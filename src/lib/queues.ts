@@ -132,6 +132,19 @@ export function bestCost(configs: QueueConfig[]) {
   return stable.reduce((a, b) => (a.totalCost < b.totalCost ? a : b));
 }
 
+/** Probabilidades consecutivas hasta cubrir el objetivo o alcanzar el límite visual. */
+export function queueDistribution(config: QueueConfig, lambda: number, mu: number, maxStates = 60): number[] {
+  if (!config.stable || !Number.isFinite(config.p0) || lambda <= 0 || mu <= 0) return [];
+  const probabilities = [config.p0];
+  let sum = config.p0;
+  for (let n = 1; n < maxStates && sum < 0.99; n++) {
+    const next = probabilities[n - 1] * (lambda / mu) / Math.min(n, config.s);
+    probabilities.push(next);
+    sum += next;
+  }
+  return probabilities;
+}
+
 export const BASE_QUEUE: QueueParams = {
   lambda: 15,
   mu: 10,

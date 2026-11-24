@@ -1,30 +1,87 @@
-import { useMemo, useState, type ReactNode } from "react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import { InfoTip } from "../components/InfoTip";
+import { useEffect, useMemo, useState } from "react";
+import { Bar, BarChart, CartesianGrid, Cell, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { AnalysisPanel } from "../components/AnalysisPanel";
+import { CollapsibleIntro } from "../components/CollapsibleIntro";
+import { chartTooltipContent } from "../components/ChartTooltip";
+import { ConceptGallery } from "../components/ConceptGallery";
 import { LearningVisual } from "../components/LearningVisual";
-import { fmtMoney } from "../lib/format";
+import { InfoTip } from "../components/InfoTip";
+import { MethodAccordionGroup } from "../components/MethodAccordionGroup";
+import { MethodStepFlow } from "../components/MethodStepFlow";
+import { ModiIterationPanel } from "../components/ModiIterationPanel";
+import { ModuleActionBar } from "../components/ModuleActionBar";
+import { NameDialog } from "../components/NameDialog";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { announce } from "../components/StatusToast";
+import { OriginSupplyCard } from "../components/OriginSupplyCard";
+import { PageSubnav } from "../components/PageSubnav";
+import { SupplyBalanceStrip } from "../components/SupplyBalanceStrip";
+import { TransportSpreadsheet } from "../components/TransportSpreadsheet";
+import { usePreferences } from "../context/PreferencesContext";
+import { useTheme } from "../context/ThemeContext";
+import { downloadText, transportToCsv, transportToJson } from "../lib/exportData";
+import { fmtMoney, fmtSignedPct } from "../lib/format";
+import { chartMargin, chartPalette } from "../lib/chartTheme";
+import { loadTransportScenario, saveTransportScenario } from "../lib/scenarioStorage";
 import {
+  deleteTransportScenario,
+  listTransportScenarios,
+  renameTransportScenario,
+  saveTransportNamed,
+  TRANSPORT_EXAMPLES,
+} from "../lib/scenarioBook";
+import { decodeScenario, encodeScenario, readHashParams, setHashScenario } from "../lib/urlScenario";
+import { transportConclusions } from "../lib/conclusions";
+import { validateTransportInput } from "../lib/transportValidation";
+import {
+  addDestination,
+  addOrigin,
   BASE_TRANSPORT,
+  MAX_TRANSPORT_DIM,
   balance,
   minimumCost,
   modi,
   northwest,
+  totalsBalanced,
+  removeDestination,
+  removeOrigin,
   type TransportInput,
   vogel,
 } from "../lib/transport";
 
+const SUBNAV = [
+  { id: "section-datos", label: "Datos" },
+  { id: "section-comparar", label: "Comparar" },
+  { id: "section-analisis", label: "Análisis" },
+  { id: "section-metodos", label: "Métodos" },
+];
+
 export function TransportPage() {
-  const [input, setInput] = useState<TransportInput>(BASE_TRANSPORT);
+  const { resolved } = useTheme();
+  const { prefs } = usePreferences();
+  const palette = chartPalette(resolved);
+  const [bookTick, setBookTick] = useState(0);
+  const [nameAsk, setNameAsk] = useState<{ mode: "save" } | { mode: "rename"; id: string; name: string } | null>(null);
+  const [dropAsk, setDropAsk] = useState<{ id: string; name: string } | null>(null);
+  const savedScenarios = useMemo(() => listTransportScenarios(), [bookTick]);
+  const [input, setInput] = useState<TransportInput>(() => {
+    const fromUrl = readHashParams().d;
+    if (fromUrl) {
+      const decoded = decodeScenario<TransportInput>(decodeURIComponent(fromUrl));
+      if (decoded) return decoded;
+    }
+    return loadTransportScenario() ?? BASE_TRANSPORT;
+  });
+
+  useEffect(() => {
+    saveTransportScenario(input);
+  }, [input]);
+
+  const fieldErrors = useMemo(() => validateTransportInput(input), [input]);
+  const hasErrors = fieldErrors.length > 0;
 
   const results = useMemo(() => {
+    if (hasErrors) return null;
     const bal = balance(input);
     const no = northwest(bal);
     const cm = minimumCost(bal);
@@ -37,224 +94,451 @@ export function TransportPage() {
           : no.allocation;
     const opt = modi(bal.costs, bestStart);
     return { bal, no, cm, vo, opt };
-  }, [input]);
+  }, [input, hasErrors]);
 
-  const chartData = [
-    { name: "Noroeste", costo: results.no.totalCost },
-    { name: "Costo mín.", costo: results.cm.totalCost },
-    { name: "Vogel", costo: results.vo.totalCost },
-    { name: results.opt.certified ? "Óptimo" : "MODI (sin certificar)", costo: results.opt.totalCost },
-  ];
+  const maxSupply = useMemo(() => Math.max(...input.supply, 1), [input.supply]);
+  const totalSupply = useMemo(() => input.supply.reduce((a, b) => a + b, 0), [input.supply]);
+  const totalDemand = useMemo(() => input.demand.reduce((a, b) => a + b, 0), [input.demand]);
+  const supplyDemandBalanced = totalsBalanced(totalSupply, totalDemand);
 
-  const optimal = results.opt.totalCost;
-  const gap = (z: number) =>
-    optimal > 0 ? ((z - optimal) / optimal) * 100 : 0;
+  const chartData = results
+    ? [
+        { name: "Noroeste", costo: results.no.totalCost, key: "no" },
+        { name: "Costo mín.", costo: results.cm.totalCost, key: "cm" },
+        { name: "Vogel", costo: results.vo.totalCost, key: "vo" },
+        {
+          name: results.opt.certified ? "Óptimo" : "MODI (sin certificar)",
+          costo: results.opt.totalCost,
+          key: "opt",
+        },
+      ]
+    : [];
+
+  const optimal = results?.opt.totalCost ?? 0;
+  const gap = (z: number) => (optimal > 0 ? ((z - optimal) / optimal) * 100 : 0);
+
+  const balPreview = useMemo(() => balance(input), [input]);
+  const balanceNote = balPreview.dummyCol ? (
+    <>Destino ficticio &quot;{balPreview.destNames.at(-1)}&quot; con demanda {balPreview.surplus}.</>
+  ) : balPreview.dummyRow ? (
+    <>Origen ficticio con oferta {balPreview.surplus} (demanda no cubierta).</>
+  ) : undefined;
+
+  const flowOrigins = results ? results.bal.originNames : input.originNames;
+  const flowDests = results ? results.bal.destNames : input.destNames;
+  const fictitiousDestIdx = results?.bal.dummyCol ? [results.bal.destNames.length - 1] : [];
+  const fictitiousOrigIdx = results?.bal.dummyRow ? [results.bal.originNames.length - 1] : [];
+
+  const copyAllocation = async () => {
+    if (!results) return;
+    const header = ["Origen", ...results.bal.destNames].join("\t");
+    const rows = results.opt.allocation.map((row, i) => [results.bal.originNames[i], ...row].join("\t"));
+    try {
+      await navigator.clipboard.writeText([header, ...rows].join("\n"));
+      announce("Asignación copiada");
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const share = async () => {
+    const enc = encodeScenario(input);
+    setHashScenario("transporte", enc);
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      announce("Enlace copiado");
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const barColor = (key: string) => {
+    if (key === "opt" && results?.opt.certified) return palette.transportBarOpt;
+    if (key === "opt") return palette.transportBarMuted;
+    return palette.transportBar;
+  };
+
+  const methodItems = results
+    ? [
+        {
+          id: "no",
+          title: "Esquina Noroeste",
+          subtitle: fmtMoney(results.no.totalCost),
+          content: (
+            <>
+            <p><InfoTip label="Cómo funciona Noroeste">Parte de la esquina superior izquierda y asigna lo máximo posible antes de avanzar; no considera los costos al elegir la ruta.</InfoTip></p>
+            <MethodStepFlow
+              steps={results.no.steps}
+              originNames={flowOrigins}
+              destNames={flowDests}
+              fictitiousOrigins={fictitiousOrigIdx}
+              fictitiousDests={fictitiousDestIdx}
+            />
+            </>
+          ),
+        },
+        {
+          id: "cm",
+          title: "Costo Mínimo",
+          subtitle: fmtMoney(results.cm.totalCost),
+          content: (
+            <>
+            <p><InfoTip label="Cómo funciona Costo Mínimo">Elige una ruta disponible de menor costo y asigna lo máximo posible; repite hasta completar la distribución.</InfoTip></p>
+            <MethodStepFlow
+              steps={results.cm.steps}
+              originNames={flowOrigins}
+              destNames={flowDests}
+              fictitiousOrigins={fictitiousOrigIdx}
+              fictitiousDests={fictitiousDestIdx}
+            />
+            </>
+          ),
+        },
+        {
+          id: "vo",
+          title: "Vogel",
+          subtitle: fmtMoney(results.vo.totalCost),
+          content: (
+            <>
+            <p><InfoTip label="Cómo funciona Vogel">Calcula penalizaciones como la diferencia entre los dos costos disponibles más bajos; prioriza la mayor penalización.</InfoTip></p>
+            <MethodStepFlow
+              steps={results.vo.steps}
+              originNames={flowOrigins}
+              destNames={flowDests}
+              fictitiousOrigins={fictitiousOrigIdx}
+              fictitiousDests={fictitiousDestIdx}
+            />
+            </>
+          ),
+        },
+        {
+          id: "modi",
+          title: results.opt.certified ? "Óptimo (MODI)" : "MODI: sin certificar",
+          subtitle: fmtMoney(results.opt.totalCost),
+          content: (
+            <>
+              <p><InfoTip label="Cómo funciona MODI">Evalúa costos reducidos y, cuando encuentra una mejora, ajusta la asignación mediante un ciclo. La optimalidad solo se afirma cuando queda certificada.</InfoTip></p>
+              {results.opt.iterations.map((it, i) => (
+                <ModiIterationPanel
+                  key={i}
+                  iteration={it}
+                  index={i}
+                  originNames={results.bal.originNames}
+                  destNames={results.bal.destNames}
+                />
+              ))}
+              {!results.opt.certified && <p className="badge warn">Sin certificar optimalidad.</p>}
+              <div className="panel-actions">
+                <button type="button" className="btn ghost sm" onClick={() => void copyAllocation()}>
+                  Copiar asignación
+                </button>
+              </div>
+              <AllocationTable names={results.bal} alloc={results.opt.allocation} />
+            </>
+          ),
+        },
+      ]
+  : [];
 
   return (
     <div className="page transport">
-      <header className="page-head">
-        <h1>Algoritmos de transporte</h1>
-        <p>
-          Define ofertas, demandas y costos. El balanceo agrega un destino u origen ficticio cuando
-          hace falta.
-        </p>
-        <button
-          type="button"
-          className="btn ghost"
-          onClick={() => setInput(BASE_TRANSPORT)}
-        >
-          Restablecer ejemplo base (vacunas 3×4)
-        </button>
+      <header className="page-head page-head-actions">
+        <div>
+          <h1>
+            <InfoTip label="Algoritmos de transporte">
+              Reparte la oferta de cada origen entre destinos al menor costo. Esquina Noroeste, costo mínimo y Vogel dan soluciones iniciales; MODI comprueba si ya son óptimas.
+            </InfoTip>
+          </h1>
+          <p>Ejemplo base: vacunas de tres centros hacia cuatro hospitales. Cambia un dato y el análisis se recalcula.</p>
+        </div>
+        <ModuleActionBar
+          onReset={() => setInput(BASE_TRANSPORT)}
+          examples={TRANSPORT_EXAMPLES.map((ex) => ({
+            name: ex.name,
+            onSelect: () => setInput(ex.data),
+          }))}
+          saved={savedScenarios.map((item) => ({
+            id: item.id,
+            name: item.name,
+            onSelect: () => {
+              setInput(item.data);
+              announce(`Escenario ${item.name} cargado`);
+            },
+            onRename: () => setNameAsk({ mode: "rename", id: item.id, name: item.name }),
+            onDelete: () => setDropAsk({ id: item.id, name: item.name }),
+          }))}
+          onSave={() => setNameAsk({ mode: "save" })}
+          onExportCsv={() => {
+            downloadText("transporte.csv", transportToCsv(input), "text/csv");
+            announce("transporte.csv descargado");
+          }}
+          onExportJson={() => {
+            downloadText("transporte.json", transportToJson(input), "application/json");
+            announce("transporte.json descargado");
+          }}
+          onShare={() => void share()}
+          onPrint={() => window.print()}
+        />
       </header>
 
-      <section className="card learning-panel">
-        <div><p className="kicker">Para empezar</p><h2>¿Qué resuelve este módulo?</h2><p>Distribuye unidades entre lugares de origen y destinos para comparar el costo de distintas alternativas.</p><p><strong>Orden sugerido:</strong> ingresa los datos, revisa el balance y compara los métodos. Después consulta las iteraciones y la asignación final.</p></div>
-        <LearningVisual kind="transport" />
-      </section>
+      <PageSubnav items={SUBNAV} />
 
-      <section className="grid-2">
-        <Panel title="Datos del problema">
-          <div className="field-grid">
+      <CollapsibleIntro storageKey="estudio-io-intro-transport">
+        <div className="learning-panel-inner">
+          <div>
+            <p className="kicker">Para empezar</p>
+            <h2>
+              <InfoTip label="¿Qué resuelve este módulo?">
+                Minimiza el costo de enviar unidades desde orígenes con oferta hasta destinos con demanda. El ejemplo cargado es la distribución semanal de vacunas.
+              </InfoTip>
+            </h2>
+            <p>
+              Tres centros tienen 1.000, 1.250 y 850 dosis. Cuatro hospitales piden 800, 700, 700 y 600. Sobran 300 dosis y guardarlas cuesta $3, $1 y $2 según el centro. Los métodos no eligen solos el almacén más barato: a veces conviene usar ese centro en una ruta real.
+            </p>
+          </div>
+          <LearningVisual kind="transport" />
+        </div>
+        <ConceptGallery kind="transport" />
+      </CollapsibleIntro>
+
+      <section id="section-datos" className="card panel arch-panel">
+        <header className="panel-title-row">
+          <h2><InfoTip label="Datos del problema">Introduce la oferta de cada origen, la demanda de cada destino y el costo unitario de cada ruta. Si los totales difieren, se añade un origen o destino ficticio.</InfoTip></h2>
+          <span className="panel-accent-line" aria-hidden />
+        </header>
+        {hasErrors && (
+          <p className="badge warn" role="alert">
+            {fieldErrors.length} celda(s) con error — corrige los valores marcados.
+          </p>
+        )}
+        <SupplyBalanceStrip
+          totalSupply={totalSupply}
+          totalDemand={totalDemand}
+          balanced={supplyDemandBalanced}
+          balanceNote={balanceNote}
+        />
+        <div className="panel-actions dim-controls">
+          <button
+            type="button"
+            className="btn ghost sm"
+            disabled={input.originNames.length >= MAX_TRANSPORT_DIM}
+            title={input.originNames.length >= MAX_TRANSPORT_DIM ? "Límite de 10 orígenes" : undefined}
+            onClick={() => setInput(addOrigin(input))}
+          >
+            + Origen
+          </button>
+          <button
+            type="button"
+            className="btn ghost sm"
+            disabled={input.originNames.length <= 1}
+            onClick={() => setInput(removeOrigin(input, input.originNames.length - 1))}
+          >
+            − Origen
+          </button>
+          <button
+            type="button"
+            className="btn ghost sm"
+            disabled={input.destNames.length >= MAX_TRANSPORT_DIM}
+            title={input.destNames.length >= MAX_TRANSPORT_DIM ? "Límite de 10 destinos" : undefined}
+            onClick={() => setInput(addDestination(input))}
+          >
+            + Destino
+          </button>
+          <button
+            type="button"
+            className="btn ghost sm"
+            disabled={input.destNames.length <= 1}
+            onClick={() => setInput(removeDestination(input, input.destNames.length - 1))}
+          >
+            − Destino
+          </button>
+        </div>
+        {prefs.originView === "cards" ? (
+          <div className="origin-arch-grid">
             {input.originNames.map((name, i) => (
-              <div key={i} className="origin-block">
-                <InfoTip label={`Origen ${i + 1}`}>
-                  Centro de abastecimiento i. La oferta es el inventario disponible en la semana.
-                </InfoTip>
-                <input
-                  value={name}
-                  onChange={(e) => {
-                    const originNames = [...input.originNames];
-                    originNames[i] = e.target.value;
-                    setInput({ ...input, originNames });
-                  }}
-                />
-                <label>
-                  Oferta
-                  <input
-                    type="number"
-                    min="0.01"
-                    step="any"
-                    value={input.supply[i]}
-                    onChange={(e) => {
-                      if (!Number.isFinite(e.target.valueAsNumber) || e.target.valueAsNumber <= 0) return;
-                      const supply = [...input.supply];
-                      supply[i] = +e.target.value;
-                      setInput({ ...input, supply });
-                    }}
-                  />
-                </label>
-                <label>
-                  <InfoTip label="Costo reserva">
-                    Costo por unidad no despachada (columna ficticia al balancear excedente).
-                  </InfoTip>
-                  <input
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={input.storageCosts?.[i] ?? 0}
-                    onChange={(e) => {
-                      if (!Number.isFinite(e.target.valueAsNumber) || e.target.valueAsNumber < 0) return;
-                      const storageCosts = [...(input.storageCosts ?? [])];
-                      storageCosts[i] = +e.target.value;
-                      setInput({ ...input, storageCosts });
-                    }}
-                  />
-                </label>
-              </div>
+              <OriginSupplyCard
+                key={i}
+                index={i}
+                name={name}
+                supply={input.supply[i]}
+                storageCost={input.storageCosts?.[i] ?? 0}
+                maxSupply={maxSupply}
+                destNames={input.destNames}
+                costs={input.costs[i]}
+                onName={(v) => {
+                  const originNames = [...input.originNames];
+                  originNames[i] = v;
+                  setInput({ ...input, originNames });
+                }}
+                onSupply={(v) => {
+                  const supply = [...input.supply];
+                  supply[i] = v;
+                  setInput({ ...input, supply });
+                }}
+                onStorage={(v) => {
+                  const storageCosts = [...(input.storageCosts ?? [])];
+                  storageCosts[i] = v;
+                  setInput({ ...input, storageCosts });
+                }}
+                onCost={(j, value) => {
+                  const costs = input.costs.map((row) => [...row]);
+                  costs[i][j] = value;
+                  setInput({ ...input, costs });
+                }}
+              />
             ))}
           </div>
-          <p className="balance-note">
-            {results.bal.dummyCol && (
-              <>
-                Destino ficticio &quot;{results.bal.destNames.at(-1)}&quot; con demanda{" "}
-                {results.bal.surplus} (excedente de oferta).
-              </>
-            )}
-            {results.bal.dummyRow && <>Origen ficticio con oferta {results.bal.surplus} y costo cero: representa demanda no cubierta, no un abastecimiento real.</>}
-            {!results.bal.dummyCol && !results.bal.dummyRow && <>Problema balanceado.</>}
-          </p>
-        </Panel>
-
-        <Panel title="Demandas y costos de transporte">
-          <div className="table-wrap"><table className="data-table matrix-table">
-            <thead><tr><th>Origen / destino</th>{input.destNames.map((name) => <th key={name}>{name}</th>)}</tr></thead>
-            <tbody>
-              {input.costs.map((row, i) => <tr key={i}><th>{input.originNames[i]}</th>{row.map((cost, j) => <td key={j}>
-                <input aria-label={`Costo ${input.originNames[i]} a ${input.destNames[j]}`} type="number" min="0" step="any" value={cost}
-                  onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isFinite(value) || value < 0) return; const costs = input.costs.map((r) => [...r]); costs[i][j] = value; setInput({ ...input, costs }); }} />
-              </td>)}</tr>)}
-              <tr><th>Demanda</th>{input.demand.map((value, j) => <td key={j}>
-                <input aria-label={`Demanda ${input.destNames[j]}`} type="number" min="0.01" step="any" value={value}
-                  onChange={(e) => { const v = e.target.valueAsNumber; if (!Number.isFinite(v) || v <= 0) return; const demand = [...input.demand]; demand[j] = v; setInput({ ...input, demand }); }} />
-              </td>)}</tr>
-            </tbody>
-          </table></div>
-          <p className="balance-note">Las demandas deben ser positivas y los costos no negativos.</p>
-        </Panel>
-
-        <Panel title="Comparación de costos">
-          <p>La altura de cada barra muestra el costo total: una barra más baja representa menor costo. Compara los resultados en la tabla y verifica si MODI certificó el óptimo.</p>
-          <ResponsiveContainer width="100%" height={260}>
-            <BarChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#d5deea" />
-              <XAxis dataKey="name" tick={{ fontSize: 12 }} />
-              <YAxis tickFormatter={(v) => `$${(v / 1000).toFixed(1)}k`} />
-              <Tooltip formatter={(v) => fmtMoney(Number(v))} />
-              <Bar dataKey="costo" fill="#102d69" radius={[6, 6, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Método</th>
-                <th>Z</th>
-                <th>vs. óptimo</th>
-              </tr>
-            </thead>
-            <tbody>
-              {chartData.map((row) => (
-                <tr key={row.name} className={row.name === "Óptimo" ? "opt-row" : ""}>
-                  <td>{row.name}</td>
-                  <td>{fmtMoney(row.costo)}</td>
-                  <td>{!results.opt.certified || row.name === "Óptimo" ? "-" : `+${gap(row.costo).toFixed(1)} %`}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Panel>
+        ) : (
+          <TransportSpreadsheet
+            input={input}
+            assignmentHint={results?.opt.allocation}
+            errors={fieldErrors}
+            onChange={setInput}
+          />
+        )}
       </section>
+      <NameDialog
+        open={nameAsk != null}
+        title={nameAsk?.mode === "rename" ? "Renombrar escenario" : "Guardar escenario"}
+        initial={nameAsk?.mode === "rename" ? nameAsk.name : "Mi transporte"}
+        onCancel={() => setNameAsk(null)}
+        onConfirm={(name) => {
+          if (nameAsk?.mode === "rename") renameTransportScenario(nameAsk.id, name);
+          else {
+            saveTransportNamed(name, input);
+            announce(`Escenario ${name} guardado`);
+          }
+          setBookTick((tick) => tick + 1);
+          setNameAsk(null);
+        }}
+      />
+      <ConfirmDialog
+        open={dropAsk != null}
+        title="Eliminar escenario"
+        message={dropAsk ? `¿Eliminar "${dropAsk.name}"?` : ""}
+        onCancel={() => setDropAsk(null)}
+        onConfirm={() => {
+          if (dropAsk) deleteTransportScenario(dropAsk.id);
+          setBookTick((tick) => tick + 1);
+          setDropAsk(null);
+        }}
+      />
 
-      <section className="tabs card">
-        <MethodBlock title="Esquina Noroeste" cost={results.no.totalCost} steps={results.no.steps} />
-        <MethodBlock title="Costo Mínimo" cost={results.cm.totalCost} steps={results.cm.steps} />
-        <MethodBlock title="Vogel" cost={results.vo.totalCost} steps={results.vo.steps} />
-        <div className="method-block">
-          <h3>
-            {results.opt.certified ? "Óptimo (MODI)" : "MODI: solución sin certificar"} - {fmtMoney(results.opt.totalCost)}
-            <InfoTip label="?">Potenciales u,v, costos reducidos y mejoras por circuitos cerrados.</InfoTip>
-          </h3>
-          {results.opt.iterations.map((it, i) => (
-            <div key={i} className="step-card">
-              <strong>Iteración {i + 1}</strong> — Z = {fmtMoney(it.cost)}
-              {it.optimal ? (
-                <span className="badge ok">Solución óptima (todos los δ ≥ 0)</span>
-              ) : (
-                <span className="badge warn">
-                  Entra {results.bal.originNames[it.entering!.i]} → {results.bal.destNames[it.entering!.j]} con δ = {it.entering?.rc}; θ = {it.theta ?? "no calculado"}
-                </span>
-              )}
+      {results && (
+        <section id="section-comparar" className="card panel arch-panel compare-split">
+          <header className="panel-title-row">
+            <h2><InfoTip label="Comparación de costos">Compara el costo total Z de las soluciones iniciales con el resultado de MODI. La diferencia frente al óptimo solo se muestra cuando este está certificado.</InfoTip></h2>
+            <span className="panel-accent-line" aria-hidden />
+          </header>
+          <div className="compare-split-inner">
+            <div className="compare-chart">
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={chartData} margin={chartMargin}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={palette.grid} />
+                  <XAxis dataKey="name" tick={{ fontSize: 12, fill: "var(--chart-axis)" }} />
+                  <YAxis domain={[0, "auto"]} tickFormatter={(v) => fmtMoney(Number(v))} tick={{ fill: "var(--chart-axis)" }} />
+                  <Tooltip content={chartTooltipContent((v) => fmtMoney(v))} />
+                  <Bar dataKey="costo" radius={[8, 8, 0, 0]}>
+                    {chartData.map((entry) => (
+                      <Cell key={entry.key} fill={barColor(entry.key)} />
+                    ))}
+                    <LabelList
+                      dataKey="costo"
+                      position="top"
+                      formatter={(v) => `${fmtMoney(Number(v))}`}
+                      style={{ fill: "var(--chart-axis)", fontSize: 12, fontWeight: 600 }}
+                    />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
             </div>
-          ))}
-          {!results.opt.certified && <p className="badge warn" role="alert">No fue posible verificar la optimalidad. No interpretes este costo como óptimo.</p>}
-          <h4>Asignación final MODI</h4>
-          <p>Cada celda muestra cuántas unidades se asignan del origen de la fila al destino de la columna. La reserva ficticia representa excedente; un origen ficticio representa faltante.</p>
-          <div className="table-wrap"><table className="data-table">
-            <thead><tr><th>Origen / destino</th>{results.bal.destNames.map((name, j) => <th key={j}>{name}</th>)}</tr></thead>
-            <tbody>{results.opt.allocation.map((row, i) => <tr key={i}><th>{results.bal.originNames[i]}</th>{row.map((v, j) => <td key={j}>{v}</td>)}</tr>)}</tbody>
-          </table></div>
-        </div>
-      </section>
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>
+                    <InfoTip label="Método">Noroeste, costo mínimo y Vogel son soluciones factibles. Óptimo solo aparece cuando MODI certifica que no queda una mejora.</InfoTip>
+                  </th>
+                  <th><InfoTip label="Z">Costo total de transporte: suma de cada cantidad enviada multiplicada por su costo unitario.</InfoTip></th>
+                  <th><InfoTip label="vs. óptimo">Porcentaje en que el costo supera el resultado óptimo certificado por MODI.</InfoTip></th>
+                </tr>
+              </thead>
+              <tbody>
+                {chartData.map((row) => (
+                  <tr key={row.name} className={row.key === "opt" && results.opt.certified ? "opt-row" : ""}>
+                    <td>{row.name}</td>
+                    <td>{fmtMoney(row.costo)}</td>
+                    <td>{!results.opt.certified || row.key === "opt" ? "—" : fmtSignedPct(gap(row.costo))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {results && (
+        <AnalysisPanel
+          title="Análisis del resultado"
+          help="Lee el costo de cada método y dónde queda el sobrante o el faltante. El texto usa los datos que están cargados ahora, no una cifra fija."
+          points={transportConclusions(results.bal, results.no, results.cm, results.vo, results.opt)}
+        />
+      )}
+
+      {results && (
+        <section id="section-metodos" className="card panel">
+          <header className="panel-title-row">
+            <h2><InfoTip label="Métodos de solución">Noroeste, costo mínimo y Vogel construyen soluciones iniciales. MODI evalúa mejoras y verifica la optimalidad cuando es posible.</InfoTip></h2>
+            <span className="panel-accent-line" aria-hidden />
+          </header>
+          <MethodAccordionGroup items={methodItems} />
+        </section>
+      )}
     </div>
   );
 }
 
-function Panel({
-  title,
-  children,
+function AllocationTable({
+  names,
+  alloc,
 }: {
-  title: string;
-  children: ReactNode;
+  names: { originNames: string[]; destNames: string[] };
+  alloc: number[][];
 }) {
+  const colTotals = names.destNames.map((_, j) => alloc.reduce((s, row) => s + row[j], 0));
+  const rowTotals = alloc.map((row) => row.reduce((a, b) => a + b, 0));
   return (
-    <section className="card panel">
-      <h2>{title}</h2>
-      {children}
-    </section>
-  );
-}
-
-function MethodBlock({
-  title,
-  cost,
-  steps,
-}: {
-  title: string;
-  cost: number;
-  steps: { label: string; detail: string }[];
-}) {
-  return (
-    <div className="method-block">
-      <h3>
-        {title} — {fmtMoney(cost)}
-      </h3>
-      <ol className="steps">
-        {steps.map((s, i) => (
-          <li key={i} title={s.detail}>
-            <strong>{s.label}</strong>
-            <span>{s.detail}</span>
-          </li>
-        ))}
-      </ol>
+    <div className="table-wrap">
+      <table className="data-table matrix-fixed">
+        <thead>
+          <tr>
+            <th />
+            {names.destNames.map((name) => (
+              <th key={name}>{name}</th>
+            ))}
+            <th>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {alloc.map((row, i) => (
+            <tr key={i}>
+              <th>{names.originNames[i]}</th>
+              {row.map((v, j) => (
+                <td key={j} className={v > 0 ? "cell-assigned" : ""}>
+                  {v > 0 ? v : "—"}
+                </td>
+              ))}
+              <th>{rowTotals[i]}</th>
+            </tr>
+          ))}
+          <tr>
+            <th>Total</th>
+            {colTotals.map((t, j) => (
+              <th key={j}>{t}</th>
+            ))}
+            <th />
+          </tr>
+        </tbody>
+      </table>
     </div>
   );
 }

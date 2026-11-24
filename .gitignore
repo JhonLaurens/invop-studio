@@ -14,6 +14,13 @@ scripts/mejorar_manual_temporal.py
 dist
 dist-ssr
 *.local
+.env
+.env.*
+credentials.json
+*.pem
+/test-results/
+/playwright-report/
+/blob-report/
 
 # Editor directories and files
 .vscode/*

@@ -24,9 +24,20 @@ export interface AllocCell {
   amount: number;
 }
 
+export interface StepPenalty {
+  name: string;
+  pen: number;
+  picked: boolean;
+}
+
 export interface TransportStep {
   label: string;
   detail: string;
+  i: number;
+  j: number;
+  qty: number;
+  rowPens?: StepPenalty[];
+  colPens?: StepPenalty[];
 }
 
 export interface TransportSolution {
@@ -41,12 +52,20 @@ export interface ModiIteration {
   reduced: number[][];
   entering?: { i: number; j: number; rc: number };
   theta?: number;
+  loop?: { i: number; j: number }[];
+  loopSign?: number[];
   cost: number;
   optimal: boolean;
 }
 
 function copy2d<T>(m: T[][]): T[][] {
   return m.map((r) => [...r]);
+}
+
+/** Igualdad numérica relativa para descartar solo ruido de suma en coma flotante. */
+export function totalsBalanced(supplyTotal: number, demandTotal: number): boolean {
+  const scale = Math.max(Math.abs(supplyTotal), Math.abs(demandTotal), Number.MIN_VALUE);
+  return Math.abs(supplyTotal - demandTotal) <= 8 * Number.EPSILON * scale;
 }
 
 export function balance(input: TransportInput): BalancedProblem {
@@ -62,7 +81,7 @@ export function balance(input: TransportInput): BalancedProblem {
   const sTot = supply.reduce((a, b) => a + b, 0);
   const dTot = demand.reduce((a, b) => a + b, 0);
 
-  if (sTot > dTot) {
+  if (!totalsBalanced(sTot, dTot) && sTot > dTot) {
     surplus = sTot - dTot;
     dummyCol = true;
     destNames.push("Reserva (ficticio)");
@@ -71,7 +90,7 @@ export function balance(input: TransportInput): BalancedProblem {
       costs[i].push(stor[i] ?? 0);
     }
     demand.push(surplus);
-  } else if (dTot > sTot) {
+  } else if (!totalsBalanced(sTot, dTot) && dTot > sTot) {
     surplus = dTot - sTot;
     dummyRow = true;
     originNames.push("Origen ficticio");
@@ -138,6 +157,9 @@ export function northwest(bal: BalancedProblem): TransportSolution {
     steps.push({
       label: `${bal.originNames[i]} → ${bal.destNames[j]}`,
       detail: `Asignar ${q}. Queda fila ${supply[i]}, columna ${demand[j]}.`,
+      i,
+      j,
+      qty: q,
     });
     if (supply[i] === 0 && demand[j] === 0) {
       j++;
@@ -178,8 +200,11 @@ export function minimumCost(bal: BalancedProblem): TransportSolution {
     supply[best.i] -= q;
     demand[best.j] -= q;
     steps.push({
-      label: `Celda (${bal.originNames[best.i]}, ${bal.destNames[best.j]}) costo ${best.c}`,
-      detail: `Asignar ${q} unidades (mínimo costo activo).`,
+      label: `${bal.originNames[best.i]} → ${bal.destNames[best.j]}`,
+      detail: `Asignar ${q} unidades (mínimo costo activo, costo ${best.c}).`,
+      i: best.i,
+      j: best.j,
+      qty: q,
     });
   }
 
@@ -285,8 +310,21 @@ export function vogel(bal: BalancedProblem): TransportSolution {
     supply[bi] -= q;
     demand[bj] -= q;
     steps.push({
-      label: `Iteración ${iter}: penalización máxima`,
-      detail: `Línea ${line.type === "r" ? bal.originNames[line.idx] : bal.destNames[line.idx]} (pen=${line.pen}). Asignar ${q} en (${bal.originNames[bi]}, ${bal.destNames[bj]}).`,
+      label: `${bal.originNames[bi]} → ${bal.destNames[bj]}`,
+      detail: `Vogel iter. ${iter}: pen máx. en ${line.type === "r" ? bal.originNames[line.idx] : bal.destNames[line.idx]} (${line.pen}). Asignar ${q}.`,
+      i: bi,
+      j: bj,
+      qty: q,
+      rowPens: activeR.map((i) => ({
+        name: bal.originNames[i],
+        pen: rowP[i],
+        picked: line.type === "r" && line.idx === i,
+      })),
+      colPens: activeC.map((j) => ({
+        name: bal.destNames[j],
+        pen: colP[j],
+        picked: line.type === "c" && line.idx === j,
+      })),
     });
     iter++;
   }
@@ -353,6 +391,8 @@ export function modi(costs: number[][], start: number[][]): {
   const m = costs.length;
   const n = costs[0].length;
   const iterations: ModiIteration[] = [];
+  const costScale = Math.max(...costs.flat().map(Math.abs), Number.MIN_VALUE);
+  const reducedTolerance = 16 * Number.EPSILON * costScale;
   // La base es un árbol bipartito; las celdas básicas con valor cero
   // deben conservarse entre iteraciones para manejar degeneración.
   const parent = Array.from({ length: m + n }, (_, i) => i);
@@ -403,7 +443,7 @@ export function modi(costs: number[][], start: number[][]): {
           continue;
         }
         reduced[i][j] = costs[i][j] - u[i] - v[j];
-        if (reduced[i][j] < minRC - 1e-9) {
+        if (reduced[i][j] < minRC - reducedTolerance) {
           minRC = reduced[i][j];
           enter = { i, j };
         }
@@ -436,9 +476,12 @@ export function modi(costs: number[][], start: number[][]): {
     }
     if (!Number.isFinite(theta) || theta === Infinity) theta = 0;
 
-    iterations[iterations.length - 1].theta = theta;
+    const prev = iterations[iterations.length - 1];
+    prev.theta = theta;
+    prev.loop = [...loop];
+    prev.loopSign = [...signs];
 
-    const leaving = loop.filter((_, k) => k % 2 === 1 && Math.abs(alloc[loop[k].i][loop[k].j] - theta) < 1e-9)
+    const leaving = loop.filter((_, k) => k % 2 === 1 && alloc[loop[k].i][loop[k].j] === theta)
       .sort((a, b) => a.i - b.i || a.j - b.j)[0];
     if (!leaving) break;
     for (let k = 0; k < loop.length; k++) {
@@ -452,6 +495,53 @@ export function modi(costs: number[][], start: number[][]): {
   }
 
   return { allocation: alloc, iterations, totalCost: z(costs, alloc), certified };
+}
+
+export const MAX_TRANSPORT_DIM = 10;
+
+export function addOrigin(input: TransportInput): TransportInput {
+  if (input.originNames.length >= MAX_TRANSPORT_DIM) return input;
+  const n = input.destNames.length;
+  const storageCosts = [...(input.storageCosts ?? input.supply.map(() => 0)), 0];
+  return {
+    ...input,
+    originNames: [...input.originNames, `Origen ${input.originNames.length + 1}`],
+    supply: [...input.supply, 100],
+    storageCosts,
+    costs: [...input.costs, Array.from({ length: n }, () => 10)],
+  };
+}
+
+export function removeOrigin(input: TransportInput, index: number): TransportInput {
+  if (input.originNames.length <= 1 || index < 0 || index >= input.originNames.length) return input;
+  const storageCosts = input.storageCosts ? input.storageCosts.filter((_, i) => i !== index) : undefined;
+  return {
+    ...input,
+    originNames: input.originNames.filter((_, i) => i !== index),
+    supply: input.supply.filter((_, i) => i !== index),
+    storageCosts,
+    costs: input.costs.filter((_, i) => i !== index),
+  };
+}
+
+export function addDestination(input: TransportInput): TransportInput {
+  if (input.destNames.length >= MAX_TRANSPORT_DIM) return input;
+  return {
+    ...input,
+    destNames: [...input.destNames, `D${input.destNames.length + 1}`],
+    demand: [...input.demand, 100],
+    costs: input.costs.map((row) => [...row, 10]),
+  };
+}
+
+export function removeDestination(input: TransportInput, index: number): TransportInput {
+  if (input.destNames.length <= 1 || index < 0 || index >= input.destNames.length) return input;
+  return {
+    ...input,
+    destNames: input.destNames.filter((_, i) => i !== index),
+    demand: input.demand.filter((_, i) => i !== index),
+    costs: input.costs.map((row) => row.filter((_, j) => j !== index)),
+  };
 }
 
 export const BASE_TRANSPORT: TransportInput = {
